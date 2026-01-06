@@ -177,10 +177,12 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
 
   // Memo 3: Build flattened task tree with depth
   const tasks = useMemo(() => {
-    // Find root nodes (items with no parent)
+    // Find root nodes (items with no parent, or whose parent is filtered out)
     const roots: string[] = [];
     for (const bead of filteredBeads) {
-      if (!parentMap.has(bead.id)) {
+      const parentId = parentMap.get(bead.id);
+      // Treat as root if no parent OR parent is not in filtered beads
+      if (!parentId || !beadMap.has(parentId)) {
         roots.push(bead.id);
       }
     }

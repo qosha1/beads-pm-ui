@@ -237,7 +237,7 @@ describe('GanttChart Component', () => {
 
     it('filters tasks by team', async () => {
       const user = userEvent.setup();
-      const { container } = render(
+      render(
         <GanttChart
           beads={mockBeads}
           dependencies={mockDependencies}
@@ -248,10 +248,10 @@ describe('GanttChart Component', () => {
       const teamFilter = screen.getByLabelText('Filter by team');
       await user.selectOptions(teamFilter, 'design');
 
-      // Should have only 1 row after filtering (Feature Task)
-      const rows = container.querySelectorAll('.gantt-info-row');
-      expect(rows.length).toBe(1);
-      expect(rows[0].textContent).toContain('Feature Task');
+      // Only Feature Task (design team) should be visible
+      expect(screen.getAllByText(/Feature Task/).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/Epic Task/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Bug Fix/)).not.toBeInTheDocument();
     });
 
     it('combines multiple filters', async () => {
