@@ -1,205 +1,338 @@
-/**
- * Integration tests for db.ts module
- *
- * NOTE: These tests require proper mocking of fs and better-sqlite3.
- * Due to the complexity of mocking Node.js built-in modules and native dependencies,
- * these tests serve as documentation of expected behavior and can be run against
- * a test database in an integration test environment.
- *
- * For unit testing individual functions, consider refactoring db.ts to inject
- * dependencies (filesystem access, database connections) for easier mocking.
- */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import path from "path";
 
-import { describe, it, expect } from "vitest";
+// Mock statement methods
+const mockStatement = {
+  all: vi.fn((): unknown[] => []),
+  get: vi.fn((): unknown => undefined),
+  run: vi.fn(() => ({ changes: 0 })),
+};
 
-describe("db.ts - Integration Test Documentation", () => {
+const mockDb = {
+  prepare: vi.fn(() => mockStatement),
+  close: vi.fn(),
+};
+
+// Mock fs/promises
+vi.mock("fs/promises", () => ({
+  default: {
+    access: vi.fn(),
+    readdir: vi.fn(),
+  },
+}));
+
+// Mock better-sqlite3 with a factory function that returns our mockDb
+vi.mock("better-sqlite3", () => {
+  return {
+    default: function MockDatabase() {
+      return mockDb;
+    },
+  };
+});
+
+// Import after mocks are set up
+import fs from "fs/promises";
+import { getTeams, getBeadsForTeam, updateBead, getDependenciesForTeam, getAllBeads } from "../db";
+
+describe("db.ts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   describe("getTeams()", () => {
-    it.skip("should return empty array when teams directory does not exist", () => {
-      // Expected behavior:
-      // - Check if ../teams directory exists
-      // - Return [] if it doesn't exist
-      expect(true).toBe(true);
+    it("returns empty array when teams directory does not exist", async () => {
+      vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
+
+      const teams = await getTeams();
+
+      expect(teams).toEqual([]);
     });
 
-    it.skip("should return empty array when teams directory is empty", () => {
-      // Expected behavior:
-      // - Read ../teams directory
-      // - Return [] if no subdirectories found
-      expect(true).toBe(true);
+    it("returns empty array when teams directory is empty", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+
+      const teams = await getTeams();
+
+      expect(teams).toEqual([]);
     });
 
-    it.skip("should return teams with valid beads.db files", () => {
-      // Expected behavior:
-      // - Scan ../teams for subdirectories
-      // - For each subdirectory, check for .beads/beads.db
-      // - Return Team[] with id, name (uppercase), and path properties
-      expect(true).toBe(true);
+    it("returns teams with valid beads.db files", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+        { name: "team2", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const teams = await getTeams();
+
+      expect(teams).toHaveLength(2);
+      expect(teams[0].id).toBe("team1");
+      expect(teams[0].name).toBe("TEAM1");
+      expect(teams[1].id).toBe("team2");
+      expect(teams[1].name).toBe("TEAM2");
     });
 
-    it.skip("should filter out directories without beads.db", () => {
-      // Expected behavior:
-      // - Only include directories that have .beads/beads.db
-      // - Skip directories without the database file
-      expect(true).toBe(true);
+    it("filters out directories without beads.db", async () => {
+      let accessCallCount = 0;
+      vi.mocked(fs.access).mockImplementation(async (path) => {
+        accessCallCount++;
+        // First call is for TEAMS_DIR, subsequent are for beads.db paths
+        if (accessCallCount === 1) return undefined;
+        // Only team1 has beads.db
+        if (String(path).includes("team1")) return undefined;
+        throw new Error("ENOENT");
+      });
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+        { name: "team2", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const teams = await getTeams();
+
+      expect(teams).toHaveLength(1);
+      expect(teams[0].id).toBe("team1");
     });
 
-    it.skip("should only process directory entries", () => {
-      // Expected behavior:
-      // - Use isDirectory() to filter out files
-      // - Only process actual directories
-      expect(true).toBe(true);
+    it("only processes directory entries", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+        { name: "file.txt", isDirectory: () => false },
+        { name: "team2", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const teams = await getTeams();
+
+      expect(teams).toHaveLength(2);
+      expect(teams.map((t) => t.id)).toEqual(["team1", "team2"]);
     });
   });
 
   describe("getBeadsForTeam(teamId)", () => {
-    it.skip("should return empty array for non-existent team", () => {
-      // Expected behavior:
-      // - Return [] if team ID not found in teams list
-      expect(true).toBe(true);
+    it("returns empty array for non-existent team", async () => {
+      vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
+
+      const beads = await getBeadsForTeam("nonexistent");
+
+      expect(beads).toEqual([]);
     });
 
-    it.skip("should return beads with correct structure", () => {
-      // Expected behavior:
-      // - Query SELECT from issues table
-      // - Map database rows to Bead interface
-      // - Include all fields: id, title, description, status, priority, etc.
-      // - Add team property to each bead
-      expect(true).toBe(true);
+    it("returns beads with correct structure", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const mockRows = [
+        {
+          id: "bead-1",
+          title: "Test Bead",
+          description: "Description",
+          status: "open",
+          priority: 1,
+          issue_type: "task",
+          assignee: "user1",
+          estimated_minutes: 60,
+          created_at: "2025-01-01T00:00:00Z",
+          updated_at: "2025-01-01T00:00:00Z",
+          due_at: null,
+          defer_until: null,
+        },
+      ];
+
+      mockStatement.all.mockReturnValue(mockRows);
+
+      const beads = await getBeadsForTeam("team1");
+
+      expect(beads).toHaveLength(1);
+      expect(beads[0].id).toBe("bead-1");
+      expect(beads[0].title).toBe("Test Bead");
+      expect(beads[0].team).toBe("team1");
     });
 
-    it.skip("should query database with correct SQL", () => {
-      // Expected behavior:
-      // - Use prepared statement
-      // - SELECT all required fields
-      // - WHERE deleted_at IS NULL
-      // - ORDER BY priority ASC, created_at DESC
-      expect(true).toBe(true);
+    it("includes team property in returned beads", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "myteam", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const mockRows = [{ id: "bead-1", title: "Test", description: "", status: "open", priority: 1, issue_type: "task", assignee: null, estimated_minutes: null, created_at: "", updated_at: "", due_at: null, defer_until: null }];
+
+      mockStatement.all.mockReturnValue(mockRows);
+
+      const beads = await getBeadsForTeam("myteam");
+
+      expect(beads[0].team).toBe("myteam");
+    });
+  });
+
+  describe("getDependenciesForTeam(teamId)", () => {
+    it("returns empty array for non-existent team", async () => {
+      vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
+
+      const deps = await getDependenciesForTeam("nonexistent");
+
+      expect(deps).toEqual([]);
     });
 
-    it.skip("should handle empty result set", () => {
-      // Expected behavior:
-      // - Return [] when no beads found for team
-      expect(true).toBe(true);
+    it("returns dependencies from database", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const mockDeps = [
+        { issue_id: "bead-1", depends_on_id: "bead-2", type: "blocks" },
+      ];
+
+      mockStatement.all.mockReturnValue(mockDeps);
+
+      const deps = await getDependenciesForTeam("team1");
+
+      expect(deps).toHaveLength(1);
+      expect(deps[0].issue_id).toBe("bead-1");
+    });
+  });
+
+  describe("getAllBeads()", () => {
+    it("returns empty arrays when no teams exist", async () => {
+      vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
+
+      const result = await getAllBeads();
+
+      expect(result.beads).toEqual([]);
+      expect(result.dependencies).toEqual([]);
     });
 
-    it.skip("should include team property in returned beads", () => {
-      // Expected behavior:
-      // - Each returned bead should have team: teamId
-      expect(true).toBe(true);
+    it("aggregates beads and dependencies from all teams", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+        { name: "team2", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      // First calls for beads, then for dependencies
+      let callIndex = 0;
+      mockStatement.all.mockImplementation(() => {
+        callIndex++;
+        // Return different data for each call
+        if (callIndex <= 2) {
+          // Beads calls
+          return [{ id: `bead-${callIndex}`, title: "Test", description: "", status: "open", priority: 1, issue_type: "task", assignee: null, estimated_minutes: null, created_at: "", updated_at: "", due_at: null, defer_until: null }];
+        }
+        // Dependencies calls
+        return [{ issue_id: "bead-1", depends_on_id: "bead-2", type: "blocks" }];
+      });
+
+      const result = await getAllBeads();
+
+      expect(result.beads.length).toBeGreaterThan(0);
+      expect(result.dependencies.length).toBeGreaterThan(0);
     });
   });
 
   describe("updateBead(teamId, beadId, updates)", () => {
-    it.skip("should return error for non-existent team", () => {
-      // Expected behavior:
-      // - Return { success: false, error: "Team not found" }
-      expect(true).toBe(true);
+    it("returns error for non-existent team", async () => {
+      vi.mocked(fs.access).mockRejectedValue(new Error("ENOENT"));
+
+      const result = await updateBead("nonexistent", "bead-1", { title: "New" });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Team not found");
     });
 
-    it.skip("should return error when no valid fields to update", () => {
-      // Expected behavior:
-      // - Validate updates against allowedFields
-      // - Return { success: false, error: "No valid fields to update" }
-      expect(true).toBe(true);
+    it("returns error when no valid fields to update", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const result = await updateBead("team1", "bead-1", { invalid_field: "value" });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("No valid fields to update");
     });
 
-    it.skip("should successfully update valid fields", () => {
-      // Expected behavior:
-      // - Build UPDATE SQL with only allowed fields
-      // - Execute update with prepared statement
-      // - Fetch and return updated bead
-      // - Return { success: true, bead: updatedBead }
-      expect(true).toBe(true);
+    it("returns error when bead not found", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      mockStatement.run.mockReturnValue({ changes: 0 });
+
+      const result = await updateBead("team1", "nonexistent", { title: "New" });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Bead not found");
     });
 
-    it.skip("should only update allowed fields", () => {
-      // Expected behavior:
-      // - Only these fields can be updated:
-      //   - title, status, priority, assignee, due_at, estimated_minutes
-      // - Ignore any other fields in updates object
-      expect(true).toBe(true);
+    it("successfully updates valid fields", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const updatedRow = {
+        id: "bead-1",
+        title: "Updated Title",
+        description: "Desc",
+        status: "in_progress",
+        priority: 1,
+        issue_type: "task",
+        assignee: "user1",
+        estimated_minutes: 120,
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-02T00:00:00Z",
+        due_at: null,
+        defer_until: null,
+      };
+
+      mockStatement.run.mockReturnValue({ changes: 1 });
+      mockStatement.get.mockReturnValue(updatedRow);
+
+      const result = await updateBead("team1", "bead-1", { title: "Updated Title", status: "in_progress" });
+
+      expect(result.success).toBe(true);
+      expect(result.bead?.title).toBe("Updated Title");
+      expect(result.bead?.team).toBe("team1");
     });
 
-    it.skip("should return error when bead not found", () => {
-      // Expected behavior:
-      // - Check result.changes === 0
-      // - Return { success: false, error: "Bead not found" }
-      expect(true).toBe(true);
+    it("only allows specific fields to be updated", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      mockStatement.run.mockReturnValue({ changes: 0 });
+
+      const result = await updateBead("team1", "bead-1", {
+        title: "Valid",
+        id: "should-be-ignored",
+        created_at: "should-be-ignored",
+        description: "should-be-ignored",
+      });
+
+      // title is allowed, so it should proceed to update
+      // but bead not found (changes: 0)
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Bead not found");
     });
 
-    it.skip("should update timestamp automatically", () => {
-      // Expected behavior:
-      // - Always include updated_at = CURRENT_TIMESTAMP in UPDATE
-      expect(true).toBe(true);
-    });
+    it("returns error if updated bead cannot be retrieved", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
 
-    it.skip("should handle null values in updates", () => {
-      // Expected behavior:
-      // - Allow setting fields to null (e.g., assignee: null)
-      // - SQL should properly handle NULL values
-      expect(true).toBe(true);
-    });
+      mockStatement.run.mockReturnValue({ changes: 1 }); // Update succeeded
+      mockStatement.get.mockReturnValue(undefined); // Simulate failed retrieval
 
-    it.skip("should return error if updated bead cannot be retrieved", () => {
-      // Expected behavior:
-      // - If SELECT after UPDATE returns undefined
-      // - Return { success: false, error: "Failed to retrieve updated bead" }
-      expect(true).toBe(true);
-    });
-  });
+      const result = await updateBead("team1", "bead-1", { title: "New" });
 
-  describe("Connection pooling and caching", () => {
-    it.skip("should cache database connections", () => {
-      // Expected behavior:
-      // - Use LRU cache for database connections
-      // - Separate cache keys for readonly and read-write connections
-      // - MAX_CACHE_SIZE = 10
-      expect(true).toBe(true);
-    });
-
-    it.skip("should evict stale connections", () => {
-      // Expected behavior:
-      // - Remove connections older than CONNECTION_TTL_MS (5 minutes)
-      // - Close database connections on eviction
-      expect(true).toBe(true);
-    });
-
-    it.skip("should cleanup connections on process exit", () => {
-      // Expected behavior:
-      // - Register exit, SIGINT, SIGTERM handlers
-      // - Close all database connections
-      // - Clear connection cache
-      expect(true).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Failed to retrieve updated bead");
     });
   });
 });
-
-/**
- * TESTING RECOMMENDATIONS:
- *
- * 1. For proper unit testing, consider refactoring db.ts to use dependency injection:
- *    - Inject filesystem operations (fs.existsSync, fs.readdirSync)
- *    - Inject database factory function
- *    - This allows easy mocking in tests
- *
- * 2. For integration testing:
- *    - Set up a test database with known data
- *    - Point TEAMS_DIR to a test directory
- *    - Run actual database operations
- *    - Clean up after each test
- *
- * 3. For end-to-end testing:
- *    - Use actual team directories with real beads.db files
- *    - Test full workflow: getTeams -> getBeadsForTeam -> updateBead
- *    - Verify data persists correctly
- *
- * 4. Current mocking challenges:
- *    - better-sqlite3 is a native module, difficult to mock in Vitest
- *    - fs module mocking requires careful setup with vi.mock()
- *    - Module imports with mocks need proper ordering
- *
- * 5. Alternative approach:
- *    - Create a wrapper/adapter for database operations
- *    - Test the wrapper with mocks
- *    - Trust better-sqlite3's own test coverage
- */

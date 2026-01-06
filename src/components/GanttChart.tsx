@@ -11,6 +11,8 @@ import {
   endOfDay,
   startOfMonth,
   getMonth,
+  startOfWeek,
+  getWeek,
 } from "date-fns";
 import type { Bead, Dependency } from "@/lib/types";
 import { EditModal } from "./EditModal";
@@ -26,7 +28,8 @@ interface GanttTask {
   bead: Bead;
   start: Date;
   end: Date;
-  progress: number;
+  progress: number;  // Status-based progress (0/50/100)
+  timeProgress: number;  // Time-elapsed progress (0-100)
   depth: number;
   hasChildren: boolean;
   parentId: string | null;
@@ -38,27 +41,39 @@ const DEFAULT_ZOOM_INDEX = 3;
 const INDENT_WIDTH = 20;
 const COLLAPSE_STORAGE_KEY = "gantt-collapsed-tasks";
 
+interface DragState {
+  taskId: string;
+  type: "move" | "resize-start" | "resize-end";
+  startX: number;
+  originalStart: Date;
+  originalEnd: Date;
+  currentStart: Date;
+  currentEnd: Date;
+}
+
 export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
   const [editingBead, setEditingBead] = useState<Bead | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
-    // Load collapsed state from localStorage
-    if (typeof window !== "undefined") {
-      try {
-        const stored = localStorage.getItem(COLLAPSE_STORAGE_KEY);
-        if (stored) {
-          return new Set(JSON.parse(stored));
-        }
-      } catch (e) {
-        console.warn("Failed to load collapsed state:", e);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [mounted, setMounted] = useState(false);
+
+  // Load collapsed state from localStorage after mount to avoid hydration mismatch
+  useEffect(() => {
+    setMounted(true);
+    try {
+      const stored = localStorage.getItem(COLLAPSE_STORAGE_KEY);
+      if (stored) {
+        setCollapsed(new Set(JSON.parse(stored)));
       }
+    } catch (e) {
+      console.warn("Failed to load collapsed state:", e);
     }
-    return new Set();
-  });
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [teamFilter, setTeamFilter] = useState<string>("all");
   const [focusedRowIndex, setFocusedRowIndex] = useState<number>(0);
+  const [dragState, setDragState] = useState<DragState | null>(null);
   const dayWidth = ZOOM_LEVELS[zoomIndex];
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const headerTimelineRef = useRef<HTMLDivElement>(null);
@@ -197,8 +212,13 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
     };
 
     const taskList: GanttTask[] = [];
+    const visited = new Set<string>();
 
     const traverse = (id: string, depth: number) => {
+      // Prevent duplicate entries (a bead could be child of multiple parents)
+      if (visited.has(id)) return;
+      visited.add(id);
+
       const bead = beadMap.get(id);
       if (!bead) return;
 
@@ -206,6 +226,7 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
       const children = childrenMap.get(id) || [];
       const hasChildren = children.length > 0;
 
+      // Status-based progress
       const progress =
         bead.status === "closed"
           ? 100
@@ -213,11 +234,22 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
           ? 50
           : 0;
 
+      // Time-elapsed progress (how much of the duration has passed)
+      const now = new Date();
+      const taskStart = startOfDay(dates.start);
+      const taskEnd = endOfDay(dates.end);
+      const totalDuration = taskEnd.getTime() - taskStart.getTime();
+      const elapsed = now.getTime() - taskStart.getTime();
+      const timeProgress = totalDuration > 0
+        ? Math.max(0, Math.min(100, (elapsed / totalDuration) * 100))
+        : 0;
+
       taskList.push({
         bead,
-        start: startOfDay(dates.start),
-        end: endOfDay(dates.end),
+        start: taskStart,
+        end: taskEnd,
         progress,
+        timeProgress,
         depth,
         hasChildren,
         parentId: parentMap.get(id) || null,
@@ -299,6 +331,90 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
     return monthsArr;
   }, [days]);
 
+  // Memo 6: Calculate time header units based on zoom level
+  // Note: isToday checks only run after mount to avoid hydration mismatch
+  const timeHeaderUnits = useMemo(() => {
+    // Determine display mode based on dayWidth
+    // dayWidth >= 16: show individual days
+    // dayWidth >= 12: show every 2nd day
+    // dayWidth >= 8: show weeks
+    // dayWidth < 8: show weeks only (no day numbers)
+
+    if (dayWidth >= 16) {
+      // Show individual days
+      return {
+        mode: "days" as const,
+        units: days.map((day, i) => ({
+          date: day,
+          width: dayWidth,
+          label: day.getDate() === 1 || i === 0 ? format(day, "d") : String(day.getDate()),
+          isWeekend: isWeekend(day),
+          isToday: mounted && isToday(day),
+        })),
+      };
+    } else if (dayWidth >= 12) {
+      // Show every other day or week starts
+      return {
+        mode: "sparse-days" as const,
+        units: days.map((day, i) => ({
+          date: day,
+          width: dayWidth,
+          label: (day.getDay() === 1 || day.getDate() === 1 || i === 0)
+            ? String(day.getDate())
+            : "",
+          isWeekend: isWeekend(day),
+          isToday: mounted && isToday(day),
+        })),
+      };
+    } else {
+      // Group into weeks
+      const weeks: { startDate: Date; endDate: Date; days: number; label: string; hasToday: boolean }[] = [];
+      let currentWeek = -1;
+      let weekDays = 0;
+      let weekStart: Date | null = null;
+      let weekHasToday = false;
+
+      for (const day of days) {
+        const week = getWeek(day);
+        if (week !== currentWeek) {
+          if (currentWeek !== -1 && weekStart) {
+            weeks.push({
+              startDate: weekStart,
+              endDate: addDays(day, -1),
+              days: weekDays,
+              label: format(weekStart, "MMM d"),
+              hasToday: mounted && weekHasToday,
+            });
+          }
+          currentWeek = week;
+          weekDays = 1;
+          weekStart = day;
+          weekHasToday = mounted && isToday(day);
+        } else {
+          weekDays++;
+          if (mounted && isToday(day)) weekHasToday = true;
+        }
+      }
+      if (weekDays > 0 && weekStart) {
+        weeks.push({
+          startDate: weekStart,
+          endDate: days[days.length - 1],
+          days: weekDays,
+          label: format(weekStart, "MMM d"),
+          hasToday: mounted && weekHasToday,
+        });
+      }
+
+      return {
+        mode: "weeks" as const,
+        units: weeks.map(w => ({
+          ...w,
+          width: w.days * dayWidth,
+        })),
+      };
+    }
+  }, [days, dayWidth, mounted]);
+
   // Scroll to today on mount or zoom change
   useEffect(() => {
     if (bodyScrollRef.current) {
@@ -316,9 +432,10 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
     }
   };
 
-  const getBarPosition = (task: GanttTask, rowIndex: number) => {
-    const startOffset = differenceInDays(task.start, startDate);
-    const duration = differenceInDays(task.end, task.start) + 1;
+  const getBarPosition = (task: GanttTask, rowIndex: number, useDragDates = false) => {
+    const dates = useDragDates ? getDragAdjustedDates(task) : { start: task.start, end: task.end };
+    const startOffset = differenceInDays(dates.start, startDate);
+    const duration = differenceInDays(dates.end, dates.start) + 1;
 
     // Center bar vertically based on depth (smaller bars for deeper items)
     const heights = [22, 20, 18, 16];
@@ -398,6 +515,128 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
       e.preventDefault();
       setEditingBead(tasks[rowIndex].bead);
     }
+  };
+
+  // Drag handlers for date changes
+  const handleDragStart = (
+    e: React.MouseEvent,
+    task: GanttTask,
+    type: "move" | "resize-start" | "resize-end"
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragState({
+      taskId: task.bead.id,
+      type,
+      startX: e.clientX,
+      originalStart: task.start,
+      originalEnd: task.end,
+      currentStart: task.start,
+      currentEnd: task.end,
+    });
+  };
+
+  // Handle mouse move during drag
+  useEffect(() => {
+    if (!dragState) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const deltaX = e.clientX - dragState.startX;
+      const deltaDays = Math.round(deltaX / dayWidth);
+
+      if (deltaDays === 0 && dragState.currentStart.getTime() === dragState.originalStart.getTime()) {
+        return;
+      }
+
+      let newStart = dragState.originalStart;
+      let newEnd = dragState.originalEnd;
+
+      if (dragState.type === "move") {
+        newStart = addDays(dragState.originalStart, deltaDays);
+        newEnd = addDays(dragState.originalEnd, deltaDays);
+      } else if (dragState.type === "resize-start") {
+        newStart = addDays(dragState.originalStart, deltaDays);
+        // Ensure start doesn't go past end
+        if (newStart >= newEnd) {
+          newStart = addDays(newEnd, -1);
+        }
+      } else if (dragState.type === "resize-end") {
+        newEnd = addDays(dragState.originalEnd, deltaDays);
+        // Ensure end doesn't go before start
+        if (newEnd <= newStart) {
+          newEnd = addDays(newStart, 1);
+        }
+      }
+
+      setDragState((prev) =>
+        prev
+          ? { ...prev, currentStart: newStart, currentEnd: newEnd }
+          : null
+      );
+    };
+
+    const handleMouseUp = async () => {
+      if (dragState) {
+        const task = tasks.find((t) => t.bead.id === dragState.taskId);
+        if (task) {
+          const startChanged =
+            dragState.currentStart.getTime() !== dragState.originalStart.getTime();
+          const endChanged =
+            dragState.currentEnd.getTime() !== dragState.originalEnd.getTime();
+
+          if (startChanged || endChanged) {
+            // Update the title with new date range
+            const newTitle = updateTitleWithDates(
+              task.bead.title,
+              dragState.currentStart,
+              dragState.currentEnd
+            );
+            if (newTitle !== task.bead.title) {
+              await onUpdate(task.bead.id, task.bead.team, { title: newTitle });
+            }
+          }
+        }
+      }
+      setDragState(null);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [dragState, dayWidth, tasks, onUpdate]);
+
+  // Helper to update title with new dates
+  const updateTitleWithDates = (title: string, start: Date, end: Date): string => {
+    // Remove existing date range pattern like [Jan 15-20] or [Jan 15 - Feb 3]
+    const dateRangePattern = /\[[A-Za-z]{3}\s+\d{1,2}(?:\s*-\s*(?:[A-Za-z]{3}\s+)?\d{1,2})?\]\s*/;
+    const cleanTitle = title.replace(dateRangePattern, "");
+
+    // Format new date range
+    const startMonth = format(start, "MMM");
+    const endMonth = format(end, "MMM");
+    const startDay = format(start, "d");
+    const endDay = format(end, "d");
+
+    let dateRange: string;
+    if (startMonth === endMonth) {
+      dateRange = `[${startMonth} ${startDay}-${endDay}]`;
+    } else {
+      dateRange = `[${startMonth} ${startDay} - ${endMonth} ${endDay}]`;
+    }
+
+    return `${dateRange} ${cleanTitle}`;
+  };
+
+  // Get drag-adjusted position for a task
+  const getDragAdjustedDates = (task: GanttTask): { start: Date; end: Date } => {
+    if (dragState && dragState.taskId === task.bead.id) {
+      return { start: dragState.currentStart, end: dragState.currentEnd };
+    }
+    return { start: task.start, end: task.end };
   };
 
   const timelineWidth = days.length * dayWidth;
@@ -494,17 +733,32 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
                 ))}
               </div>
               <div className="gantt-day-header" style={{ width: timelineWidth }}>
-                {days.map((day, i) => (
-                  <div
-                    key={i}
-                    className={`gantt-day ${isWeekend(day) ? "weekend" : ""} ${
-                      isToday(day) ? "today" : ""
-                    }`}
-                    style={{ width: dayWidth }}
-                  >
-                    {day.getDate() === 1 || i === 0 ? format(day, "d") : day.getDate()}
-                  </div>
-                ))}
+                {timeHeaderUnits.mode === "weeks" ? (
+                  // Week view
+                  timeHeaderUnits.units.map((unit, i) => (
+                    <div
+                      key={i}
+                      className={`gantt-week ${unit.hasToday ? "has-today" : ""}`}
+                      style={{ width: unit.width }}
+                      title={`Week of ${unit.label}`}
+                    >
+                      {unit.width > 40 ? unit.label : ""}
+                    </div>
+                  ))
+                ) : (
+                  // Day view (full or sparse)
+                  timeHeaderUnits.units.map((unit, i) => (
+                    <div
+                      key={i}
+                      className={`gantt-day ${unit.isWeekend ? "weekend" : ""} ${
+                        unit.isToday ? "today" : ""
+                      }`}
+                      style={{ width: unit.width }}
+                    >
+                      {unit.label}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -570,7 +824,7 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
               <div
                 key={i}
                 className={`gantt-grid-line ${isWeekend(day) ? "weekend" : ""} ${
-                  isToday(day) ? "today" : ""
+                  mounted && isToday(day) ? "today" : ""
                 }`}
                 style={{
                   left: i * dayWidth,
@@ -620,18 +874,22 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
 
             {/* Task bars */}
             {tasks.map((task, rowIndex) => {
-              const pos = getBarPosition(task, rowIndex);
+              const isDragging = dragState?.taskId === task.bead.id;
+              const pos = getBarPosition(task, rowIndex, true);
+              const dates = getDragAdjustedDates(task);
               return (
                 <div
                   key={task.bead.id}
-                  className={`gantt-bar ${task.bead.issue_type} depth-${Math.min(task.depth, 3)}`}
+                  className={`gantt-bar ${task.bead.issue_type} depth-${Math.min(task.depth, 3)} ${isDragging ? "dragging" : ""}`}
                   style={{
                     left: pos.left,
                     width: pos.width,
                     top: pos.top,
+                    cursor: dragState ? (dragState.type === "move" ? "grabbing" : "ew-resize") : "grab",
                   }}
                   tabIndex={0}
-                  onClick={() => setEditingBead(task.bead)}
+                  onClick={() => !dragState && setEditingBead(task.bead)}
+                  onMouseDown={(e) => handleDragStart(e, task, "move")}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
@@ -639,24 +897,70 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
                     }
                   }}
                   role="button"
-                  aria-label={`${task.bead.title}, ${format(task.start, "MMM d, yyyy")} to ${format(task.end, "MMM d, yyyy")}`}
-                  title={`${task.bead.title}\n${format(task.start, "MMM d, yyyy")} - ${format(task.end, "MMM d, yyyy")}`}
+                  aria-label={`${task.bead.title}, ${format(dates.start, "MMM d, yyyy")} to ${format(dates.end, "MMM d, yyyy")}`}
+                  title={`${task.bead.title}\n${format(dates.start, "MMM d, yyyy")} - ${format(dates.end, "MMM d, yyyy")}`}
                 >
+                  {/* Left resize handle */}
+                  <div
+                    className="gantt-bar-handle gantt-bar-handle-left"
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      handleDragStart(e, task, "resize-start");
+                    }}
+                    aria-label="Resize start date"
+                  />
+                  {/* Time elapsed indicator (planned) */}
+                  {task.timeProgress > 0 && task.timeProgress < 100 && (
+                    <div
+                      className="gantt-bar-time-marker"
+                      style={{ left: `${task.timeProgress}%` }}
+                      title={`${Math.round(task.timeProgress)}% of time elapsed`}
+                    />
+                  )}
+                  {/* Status-based progress (actual) */}
                   {task.progress > 0 && (
                     <div
-                      className="gantt-bar-progress"
+                      className={`gantt-bar-progress ${
+                        task.progress < task.timeProgress - 10 ? "behind" :
+                        task.progress > task.timeProgress + 10 ? "ahead" : ""
+                      }`}
                       style={{ width: `${task.progress}%` }}
                     />
                   )}
                   <span className="gantt-bar-label">
                     {pos.width > 80 ? task.bead.title.replace(/^\[[^\]]+\]\s*/, "") : ""}
                   </span>
+                  {/* Schedule indicator */}
+                  {task.bead.status !== "closed" && task.timeProgress > 0 && pos.width > 50 && (
+                    <span className={`gantt-bar-schedule-indicator ${
+                      task.progress < task.timeProgress - 10 ? "behind" :
+                      task.progress > task.timeProgress + 10 ? "ahead" : "on-track"
+                    }`}>
+                      {task.progress < task.timeProgress - 10 ? "⚠" :
+                       task.progress > task.timeProgress + 10 ? "✓" : ""}
+                    </span>
+                  )}
+                  {/* Right resize handle */}
+                  <div
+                    className="gantt-bar-handle gantt-bar-handle-right"
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      handleDragStart(e, task, "resize-end");
+                    }}
+                    aria-label="Resize end date"
+                  />
+                  {/* Drag tooltip */}
+                  {isDragging && (
+                    <div className="gantt-drag-tooltip">
+                      {format(dates.start, "MMM d")} - {format(dates.end, "MMM d")}
+                    </div>
+                  )}
                 </div>
               );
             })}
 
-            {/* Today line */}
-            {(() => {
+            {/* Today line - only render after mount to avoid hydration mismatch */}
+            {mounted && (() => {
               const todayOffset = differenceInDays(new Date(), startDate);
               if (todayOffset >= 0 && todayOffset < days.length) {
                 return (

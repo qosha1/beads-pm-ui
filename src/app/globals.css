@@ -406,6 +406,27 @@ body {
   font-weight: 600;
 }
 
+/* Week view for zoomed out */
+.gantt-week {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  color: var(--muted);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 4px;
+}
+
+.gantt-week.has-today {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--accent);
+  font-weight: 500;
+}
+
 .gantt-timeline-body {
   position: relative;
 }
@@ -523,6 +544,60 @@ body {
   bottom: 0;
   background: rgba(255, 255, 255, 0.2);
   border-radius: 4px 0 0 4px;
+  transition: width 0.2s ease;
+}
+
+.gantt-bar-progress.behind {
+  background: rgba(239, 68, 68, 0.3);
+}
+
+.gantt-bar-progress.ahead {
+  background: rgba(34, 197, 94, 0.3);
+}
+
+/* Time elapsed marker - vertical line showing where we should be */
+.gantt-bar-time-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.5);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.gantt-bar-time-marker::before {
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: -3px;
+  width: 8px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 2px 2px 0 0;
+}
+
+/* Schedule indicator icons */
+.gantt-bar-schedule-indicator {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.6rem;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.gantt-bar-schedule-indicator.behind {
+  color: #fca5a5;
+}
+
+.gantt-bar-schedule-indicator.ahead {
+  color: #86efac;
+}
+
+.gantt-bar-schedule-indicator.on-track {
+  opacity: 0;
 }
 
 .gantt-bar-label {
@@ -532,6 +607,88 @@ body {
   text-overflow: ellipsis;
   position: relative;
   z-index: 1;
+}
+
+/* Drag handles */
+.gantt-bar-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+}
+
+.gantt-bar-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 1px;
+}
+
+.gantt-bar-handle-left {
+  left: 0;
+}
+
+.gantt-bar-handle-left::after {
+  left: 3px;
+}
+
+.gantt-bar-handle-right {
+  right: 0;
+}
+
+.gantt-bar-handle-right::after {
+  right: 3px;
+}
+
+.gantt-bar:hover .gantt-bar-handle {
+  opacity: 1;
+}
+
+.gantt-bar.dragging {
+  z-index: 10;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  opacity: 0.9;
+}
+
+.gantt-bar.dragging .gantt-bar-handle {
+  opacity: 1;
+}
+
+/* Drag tooltip */
+.gantt-drag-tooltip {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.9);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.gantt-drag-tooltip::after {
+  content: "";
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 4px solid rgba(0, 0, 0, 0.9);
 }
 
 /* Badges */
