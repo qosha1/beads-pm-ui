@@ -2,6 +2,12 @@
 
 An interactive project management dashboard with Gantt chart visualization, multi-view support, and real-time filtering. Built with Next.js 15, React 19, and TypeScript.
 
+## About
+
+This project is a UI dashboard for the [Beads](https://github.com/steveyegge/beads) project management system by Steve Yegge. Beads is a lightweight, git-native issue tracking system designed for AI-assisted development workflows.
+
+**Initial development driven by [debugg.ai](https://debugg.ai)**
+
 ## Features
 
 - **Multi-View System**: Switch between Timeline (Gantt), Board (Kanban), and List views
@@ -292,6 +298,11 @@ Filter state is synced to URL for shareable views:
 4. Run `npx tsc --noEmit` to verify compilation
 5. Run `npm test` to verify tests pass
 
+## References
+
+- [Beads](https://github.com/steveyegge/beads) - The original git-native issue tracking system
+- [debugg.ai](https://debugg.ai) - AI-powered debugging and development
+
 ## License
 
-Private - All rights reserved.
+MIT - See [Beads License](https://github.com/steveyegge/beads/blob/main/LICENSE)
