@@ -1,3 +1,19 @@
+export enum HierarchyLevel {
+  MULTI_YEAR = 0,
+  HALF_YEAR = 10,
+  QUARTERLY = 20,
+  MONTHLY = 30,
+  WEEKLY = 40,
+  TASK = 50,
+}
+
+export interface ParsedHierarchy {
+  level: HierarchyLevel;
+  rawPrefix: string | null;
+  periodSortKey: number;
+  year: number | null;
+}
+
 export interface Bead {
   id: string;
   title: string;
@@ -38,6 +54,8 @@ export interface GanttTask {
   priority: number;
   type: string;
   assignee: string | null;
+  hierarchy?: ParsedHierarchy;
+  isLastChild?: boolean;
 }
 
 export interface BeadUpdate {

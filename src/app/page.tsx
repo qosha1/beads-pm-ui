@@ -157,23 +157,6 @@ export default function Dashboard() {
     <div className="app">
       <header className="header">
         <h1>Beads Dashboard</h1>
-        <div className="team-tabs">
-          <button
-            className={`team-tab ${selectedTeam === null ? "active" : ""}`}
-            onClick={() => handleTeamSelect(null)}
-          >
-            All Teams
-          </button>
-          {teams.map((team) => (
-            <button
-              key={team.id}
-              className={`team-tab ${selectedTeam === team.id ? "active" : ""}`}
-              onClick={() => handleTeamSelect(team.id)}
-            >
-              {team.name}
-            </button>
-          ))}
-        </div>
       </header>
 
       {error && (
@@ -199,6 +182,9 @@ export default function Dashboard() {
           <GanttChart
             beads={beads}
             dependencies={dependencies}
+            teams={teams}
+            selectedTeam={selectedTeam}
+            onTeamChange={handleTeamSelect}
             onUpdate={handleUpdate}
           />
         )}

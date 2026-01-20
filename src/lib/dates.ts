@@ -1,9 +1,44 @@
 import { startOfYear, endOfYear, startOfMonth, endOfMonth, addYears, addMonths } from "date-fns";
+import { parseBeadPrefix, HierarchyLevel, type ParsedPrefix } from "./sorting";
+
+// Re-export hierarchy types for convenience
+export { HierarchyLevel, type ParsedPrefix } from "./sorting";
 
 const MONTHS: Record<string, number> = {
   JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
   JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
 };
+
+/**
+ * Extended hierarchy info that includes both hierarchy level and date range.
+ */
+export interface HierarchyInfo {
+  /** Parsed prefix information including level and sort key */
+  prefix: ParsedPrefix;
+  /** Date range for this hierarchy item (null if no valid prefix) */
+  dateRange: { start: Date; end: Date } | null;
+}
+
+/**
+ * Parses hierarchy information from a bead title.
+ * Combines hierarchy level detection (from sorting.ts) with date range calculation.
+ *
+ * @param title The bead title to parse
+ * @param referenceYear The reference year for date calculations (default: 2026)
+ * @returns HierarchyInfo with both prefix metadata and date range
+ */
+export function parseHierarchyFromTitle(
+  title: string,
+  referenceYear: number = 2026
+): HierarchyInfo {
+  const prefix = parseBeadPrefix(title);
+  const dateRange = parseDateRangeFromTitle(title, referenceYear);
+
+  return {
+    prefix,
+    dateRange,
+  };
+}
 
 export function parseDateRangeFromTitle(
   title: string,

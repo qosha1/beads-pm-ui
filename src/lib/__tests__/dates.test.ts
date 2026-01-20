@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseDateRangeFromTitle } from "../dates";
+import { parseDateRangeFromTitle, parseHierarchyFromTitle, HierarchyLevel } from "../dates";
 
 describe("parseDateRangeFromTitle", () => {
   const referenceYear = 2026;
@@ -316,6 +316,186 @@ describe("parseDateRangeFromTitle", () => {
     it("should handle whitespace in brackets", () => {
       const result = parseDateRangeFromTitle("[ Q1 ] Whitespace", referenceYear);
       expect(result).toBeNull();
+    });
+  });
+});
+
+describe("parseHierarchyFromTitle", () => {
+  const referenceYear = 2026;
+
+  describe("Hierarchy level detection", () => {
+    it("should return MULTI_YEAR level for [nYR] patterns", () => {
+      const result = parseHierarchyFromTitle("[3YR] Three Year Plan", referenceYear);
+      expect(result.prefix.level).toBe(HierarchyLevel.MULTI_YEAR);
+      expect(result.prefix.raw).toBe("3YR");
+      expect(result.prefix.years).toBe(3);
+      expect(result.prefix.periodSortKey).toBe(-3); // Larger spans sort first
+    });
+
+    it("should return HALF_YEAR level for [H1] and [H2] patterns", () => {
+      const h1 = parseHierarchyFromTitle("[H1] First Half", referenceYear);
+      const h2 = parseHierarchyFromTitle("[H2] Second Half", referenceYear);
+
+      expect(h1.prefix.level).toBe(HierarchyLevel.HALF_YEAR);
+      expect(h1.prefix.periodSortKey).toBe(1);
+      expect(h2.prefix.level).toBe(HierarchyLevel.HALF_YEAR);
+      expect(h2.prefix.periodSortKey).toBe(2);
+    });
+
+    it("should return QUARTERLY level for [Q1-4] patterns", () => {
+      const q1 = parseHierarchyFromTitle("[Q1] Q1 Goals", referenceYear);
+      const q4 = parseHierarchyFromTitle("[Q4] Q4 Goals", referenceYear);
+
+      expect(q1.prefix.level).toBe(HierarchyLevel.QUARTERLY);
+      expect(q1.prefix.periodSortKey).toBe(1);
+      expect(q4.prefix.level).toBe(HierarchyLevel.QUARTERLY);
+      expect(q4.prefix.periodSortKey).toBe(4);
+    });
+
+    it("should return MONTHLY level for month patterns", () => {
+      const jan = parseHierarchyFromTitle("[JAN] January Tasks", referenceYear);
+      const dec = parseHierarchyFromTitle("[DEC] December Tasks", referenceYear);
+
+      expect(jan.prefix.level).toBe(HierarchyLevel.MONTHLY);
+      expect(jan.prefix.periodSortKey).toBe(0); // 0-indexed months
+      expect(dec.prefix.level).toBe(HierarchyLevel.MONTHLY);
+      expect(dec.prefix.periodSortKey).toBe(11);
+    });
+
+    it("should return WEEKLY level for [W1-52] patterns", () => {
+      const w1 = parseHierarchyFromTitle("[W1] Week 1", referenceYear);
+      const w52 = parseHierarchyFromTitle("[W52] Week 52", referenceYear);
+
+      expect(w1.prefix.level).toBe(HierarchyLevel.WEEKLY);
+      expect(w1.prefix.periodSortKey).toBe(1);
+      expect(w52.prefix.level).toBe(HierarchyLevel.WEEKLY);
+      expect(w52.prefix.periodSortKey).toBe(52);
+    });
+
+    it("should return TASK level for titles without prefix", () => {
+      const result = parseHierarchyFromTitle("Plain task title", referenceYear);
+
+      expect(result.prefix.level).toBe(HierarchyLevel.TASK);
+      expect(result.prefix.raw).toBeNull();
+      expect(result.prefix.periodSortKey).toBe(0);
+    });
+
+    it("should return TASK level for unknown prefix patterns", () => {
+      const result = parseHierarchyFromTitle("[UNKNOWN] Unknown prefix", referenceYear);
+
+      expect(result.prefix.level).toBe(HierarchyLevel.TASK);
+      expect(result.prefix.raw).toBe("UNKNOWN");
+    });
+  });
+
+  describe("Case insensitivity", () => {
+    it("should handle lowercase [3yr]", () => {
+      const result = parseHierarchyFromTitle("[3yr] Lowercase Year", referenceYear);
+      expect(result.prefix.level).toBe(HierarchyLevel.MULTI_YEAR);
+      expect(result.prefix.years).toBe(3);
+    });
+
+    it("should handle lowercase [h1] and [h2]", () => {
+      const h1 = parseHierarchyFromTitle("[h1] Lowercase", referenceYear);
+      const h2 = parseHierarchyFromTitle("[h2] Lowercase", referenceYear);
+      expect(h1.prefix.level).toBe(HierarchyLevel.HALF_YEAR);
+      expect(h2.prefix.level).toBe(HierarchyLevel.HALF_YEAR);
+    });
+
+    it("should handle lowercase [q1-q4]", () => {
+      const q1 = parseHierarchyFromTitle("[q1] Lowercase", referenceYear);
+      expect(q1.prefix.level).toBe(HierarchyLevel.QUARTERLY);
+    });
+
+    it("should handle lowercase month names", () => {
+      const jan = parseHierarchyFromTitle("[jan] Lowercase", referenceYear);
+      expect(jan.prefix.level).toBe(HierarchyLevel.MONTHLY);
+    });
+
+    it("should handle lowercase [w1-w52]", () => {
+      const w1 = parseHierarchyFromTitle("[w1] Lowercase", referenceYear);
+      expect(w1.prefix.level).toBe(HierarchyLevel.WEEKLY);
+    });
+  });
+
+  describe("Combined hierarchy and date range", () => {
+    it("should return both hierarchy info and date range for [Q1]", () => {
+      const result = parseHierarchyFromTitle("[Q1] Quarter One", referenceYear);
+
+      // Hierarchy info
+      expect(result.prefix.level).toBe(HierarchyLevel.QUARTERLY);
+      expect(result.prefix.periodSortKey).toBe(1);
+
+      // Date range
+      expect(result.dateRange).not.toBeNull();
+      expect(result.dateRange!.start).toEqual(new Date(2026, 0, 1));
+      expect(result.dateRange!.end).toEqual(new Date(2026, 2, 31, 23, 59, 59, 999));
+    });
+
+    it("should return both hierarchy info and date range for [JAN]", () => {
+      const result = parseHierarchyFromTitle("[JAN] January Goals", referenceYear);
+
+      // Hierarchy info
+      expect(result.prefix.level).toBe(HierarchyLevel.MONTHLY);
+      expect(result.prefix.periodSortKey).toBe(0);
+
+      // Date range
+      expect(result.dateRange).not.toBeNull();
+      expect(result.dateRange!.start).toEqual(new Date(2026, 0, 1));
+      expect(result.dateRange!.end).toEqual(new Date(2026, 0, 31, 23, 59, 59, 999));
+    });
+
+    it("should return hierarchy info but null date range for unknown prefix", () => {
+      const result = parseHierarchyFromTitle("[RANDOM] Random Task", referenceYear);
+
+      // Hierarchy info present but at TASK level
+      expect(result.prefix.level).toBe(HierarchyLevel.TASK);
+      expect(result.prefix.raw).toBe("RANDOM");
+
+      // No date range for unknown prefix
+      expect(result.dateRange).toBeNull();
+    });
+
+    it("should return hierarchy info but null date range for no prefix", () => {
+      const result = parseHierarchyFromTitle("Plain task", referenceYear);
+
+      // Hierarchy info present but at TASK level
+      expect(result.prefix.level).toBe(HierarchyLevel.TASK);
+      expect(result.prefix.raw).toBeNull();
+
+      // No date range for no prefix
+      expect(result.dateRange).toBeNull();
+    });
+  });
+
+  describe("Edge cases", () => {
+    it("should handle empty string", () => {
+      const result = parseHierarchyFromTitle("", referenceYear);
+      expect(result.prefix.level).toBe(HierarchyLevel.TASK);
+      expect(result.prefix.raw).toBeNull();
+      expect(result.dateRange).toBeNull();
+    });
+
+    it("should not match brackets in middle of title", () => {
+      const result = parseHierarchyFromTitle("Title [Q1] in middle", referenceYear);
+      expect(result.prefix.level).toBe(HierarchyLevel.TASK);
+      expect(result.prefix.raw).toBeNull();
+      expect(result.dateRange).toBeNull();
+    });
+
+    it("should work with different reference years", () => {
+      const result2025 = parseHierarchyFromTitle("[Q1] Q1", 2025);
+      expect(result2025.prefix.level).toBe(HierarchyLevel.QUARTERLY);
+      expect(result2025.dateRange!.start.getFullYear()).toBe(2025);
+
+      const result2030 = parseHierarchyFromTitle("[Q1] Q1", 2030);
+      expect(result2030.prefix.level).toBe(HierarchyLevel.QUARTERLY);
+      expect(result2030.dateRange!.start.getFullYear()).toBe(2030);
+    });
+
+    it("should use default reference year when not provided", () => {
+      const result = parseHierarchyFromTitle("[Q1] Default Year");
+      expect(result.dateRange!.start.getFullYear()).toBe(2026);
     });
   });
 });

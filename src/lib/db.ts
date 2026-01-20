@@ -116,6 +116,16 @@ if (typeof process !== "undefined") {
 export async function getTeams(): Promise<Team[]> {
   const teams: Team[] = [];
 
+  // Check for root beads database (ceo-* beads)
+  const rootBeadsPath = path.resolve(process.cwd(), "../.beads/beads.db");
+  if (await pathExists(rootBeadsPath)) {
+    teams.push({
+      id: "ceo",
+      name: "CEO",
+      path: rootBeadsPath,
+    });
+  }
+
   if (!(await pathExists(TEAMS_DIR))) {
     return teams;
   }
@@ -150,12 +160,16 @@ export async function getBeadsForTeam(teamId: string): Promise<Bead[]> {
 
   const rows = db.prepare(`
     SELECT
-      id, title, description, status, priority, issue_type,
-      assignee, estimated_minutes, created_at, updated_at,
-      due_at, defer_until
-    FROM issues
-    WHERE deleted_at IS NULL
-    ORDER BY priority ASC, created_at DESC
+      i.id, i.title, i.description, i.status, i.priority, i.issue_type,
+      i.assignee, i.estimated_minutes, i.created_at, i.updated_at,
+      COALESCE(i.due_at,
+        (SELECT substr(l.label, 5) FROM labels l
+         WHERE l.issue_id = i.id AND l.label LIKE 'due:%' LIMIT 1)
+      ) as due_at,
+      i.defer_until
+    FROM issues i
+    WHERE i.deleted_at IS NULL
+    ORDER BY i.priority ASC, i.created_at DESC
   `).all() as Array<{
     id: string;
     title: string;

@@ -48,8 +48,12 @@ describe("db.ts", () => {
       expect(teams).toEqual([]);
     });
 
-    it("returns empty array when teams directory is empty", async () => {
-      vi.mocked(fs.access).mockResolvedValue(undefined);
+    it("returns empty array when teams directory is empty and no root beads", async () => {
+      vi.mocked(fs.access).mockImplementation(async (p) => {
+        // Root beads doesn't exist, teams dir exists
+        if (String(p).includes(".beads/beads.db")) throw new Error("ENOENT");
+        return undefined;
+      });
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
       const teams = await getTeams();
@@ -58,7 +62,13 @@ describe("db.ts", () => {
     });
 
     it("returns teams with valid beads.db files", async () => {
-      vi.mocked(fs.access).mockResolvedValue(undefined);
+      let callCount = 0;
+      vi.mocked(fs.access).mockImplementation(async () => {
+        callCount++;
+        // First call is root beads check - doesn't exist
+        if (callCount === 1) throw new Error("ENOENT");
+        return undefined;
+      });
       vi.mocked(fs.readdir).mockResolvedValue([
         { name: "team1", isDirectory: () => true },
         { name: "team2", isDirectory: () => true },
@@ -73,15 +83,31 @@ describe("db.ts", () => {
       expect(teams[1].name).toBe("TEAM2");
     });
 
+    it("includes root beads (ceo) when present", async () => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: "team1", isDirectory: () => true },
+      ] as unknown as ReturnType<typeof fs.readdir> extends Promise<infer T> ? T : never);
+
+      const teams = await getTeams();
+
+      expect(teams).toHaveLength(2);
+      expect(teams[0].id).toBe("ceo");
+      expect(teams[0].name).toBe("CEO");
+      expect(teams[1].id).toBe("team1");
+    });
+
     it("filters out directories without beads.db", async () => {
-      let accessCallCount = 0;
-      vi.mocked(fs.access).mockImplementation(async (path) => {
-        accessCallCount++;
-        // First call is for TEAMS_DIR, subsequent are for beads.db paths
-        if (accessCallCount === 1) return undefined;
-        // Only team1 has beads.db
-        if (String(path).includes("team1")) return undefined;
-        throw new Error("ENOENT");
+      let callCount = 0;
+      vi.mocked(fs.access).mockImplementation(async (p) => {
+        callCount++;
+        // First call is root beads check - doesn't exist
+        if (callCount === 1) throw new Error("ENOENT");
+        // Second call is TEAMS_DIR - exists
+        if (callCount === 2) return undefined;
+        // Only team1 has beads.db (not team2)
+        if (String(p).includes("team2")) throw new Error("ENOENT");
+        return undefined;
       });
       vi.mocked(fs.readdir).mockResolvedValue([
         { name: "team1", isDirectory: () => true },
@@ -95,7 +121,13 @@ describe("db.ts", () => {
     });
 
     it("only processes directory entries", async () => {
-      vi.mocked(fs.access).mockResolvedValue(undefined);
+      let callCount = 0;
+      vi.mocked(fs.access).mockImplementation(async () => {
+        callCount++;
+        // First call is root beads check - doesn't exist
+        if (callCount === 1) throw new Error("ENOENT");
+        return undefined;
+      });
       vi.mocked(fs.readdir).mockResolvedValue([
         { name: "team1", isDirectory: () => true },
         { name: "file.txt", isDirectory: () => false },

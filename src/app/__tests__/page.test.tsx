@@ -5,12 +5,41 @@ import Dashboard from "../page";
 
 // Mock GanttChart to simplify testing
 vi.mock("@/components/GanttChart", () => ({
-  GanttChart: ({ beads, onUpdate }: { beads: unknown[]; onUpdate: (id: string, team: string, updates: Record<string, unknown>) => void }) => (
+  GanttChart: ({
+    beads,
+    onUpdate,
+    teams,
+    selectedTeam,
+    onTeamChange,
+  }: {
+    beads: unknown[];
+    onUpdate: (id: string, team: string, updates: Record<string, unknown>) => void;
+    teams?: { id: string; name: string }[];
+    selectedTeam: string | null;
+    onTeamChange: (teamId: string | null) => void;
+  }) => (
     <div data-testid="gantt-chart">
       <span data-testid="bead-count">{(beads as unknown[]).length} beads</span>
+      <span data-testid="selected-team">{selectedTeam || "all"}</span>
       <button onClick={() => onUpdate("id-1", "team-1", { status: "closed" })}>
         Update Bead
       </button>
+      {/* Team selection buttons for testing */}
+      <button
+        onClick={() => onTeamChange(null)}
+        className={selectedTeam === null ? "active" : ""}
+      >
+        All Teams
+      </button>
+      {teams?.map(team => (
+        <button
+          key={team.id}
+          onClick={() => onTeamChange(team.id)}
+          className={selectedTeam === team.id ? "active" : ""}
+        >
+          {team.name}
+        </button>
+      ))}
     </div>
   ),
 }));
@@ -117,6 +146,10 @@ describe("Dashboard Page", () => {
       setupMocks();
       render(<Dashboard />);
 
+      await waitFor(() => {
+        expect(screen.getByTestId("gantt-chart")).toBeInTheDocument();
+      });
+
       const allTeamsTab = screen.getByRole("button", { name: "All Teams" });
       expect(allTeamsTab).toHaveClass("active");
     });
@@ -153,8 +186,10 @@ describe("Dashboard Page", () => {
       const engineeringTab = screen.getByRole("button", { name: "Engineering" });
       await user.click(engineeringTab);
 
-      expect(engineeringTab).toHaveClass("active");
-      expect(screen.getByRole("button", { name: "All Teams" })).not.toHaveClass("active");
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Engineering" })).toHaveClass("active");
+        expect(screen.getByRole("button", { name: "All Teams" })).not.toHaveClass("active");
+      });
     });
 
     it("fetches team-specific beads when team is selected", async () => {

@@ -17,10 +17,70 @@ import {
 import type { Bead, Dependency } from "@/lib/types";
 import { EditModal } from "./EditModal";
 import { parseDateRangeFromTitle } from "@/lib/dates";
+import { sortTasksByHierarchy, parseBeadPrefix, HierarchyLevel } from "@/lib/sorting";
+import { FilterBar } from "./filters/FilterBar";
+import { useFilters } from "./hooks/useFilters";
+import type {
+  StatusFilter,
+  PriorityFilter,
+  IssueTypeFilter,
+} from "./filters/FilterContext";
+import {
+  calculateHealthStatus,
+  calculateExpectedProgress,
+  getHealthColor,
+  type HealthStatus,
+} from "@/lib/progress";
+import { HealthLegend } from "./shared/HealthLegend";
+
+/**
+ * Hierarchy levels for time-based prefixes in titles.
+ * Higher numbers = broader scope (parent level).
+ * Used to distinguish hierarchical containment from sequential dependencies.
+ *
+ * Hierarchy: 1YR > H1/H2 > Q1-Q4 > Months > Weeks > no prefix
+ */
+function getHierarchyLevel(title: string): number {
+  const match = title.match(/^\[([^\]]+)\]/);
+  if (!match) return 0; // No prefix = leaf level
+
+  const tag = match[1].toUpperCase();
+
+  // Multi-year: [3YR], [1YR], [5YR] - highest level
+  if (/^\d+YR$/.test(tag)) {
+    const years = parseInt(tag);
+    return 100 + years; // 1YR=101, 3YR=103, etc.
+  }
+
+  // Half year: [H1], [H2]
+  if (/^H[12]$/.test(tag)) return 50;
+
+  // Quarters: [Q1], [Q2], [Q3], [Q4]
+  if (/^Q[1-4]$/.test(tag)) return 40;
+
+  // Months: [JAN], [FEB], etc.
+  const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  if (MONTHS.includes(tag)) return 30;
+
+  // Weeks: [W1], [W2], etc.
+  if (/^W\d+$/.test(tag)) return 20;
+
+  // Unknown prefix - treat as low level
+  return 10;
+}
+
+interface Team {
+  id: string;
+  name: string;
+}
 
 interface GanttChartProps {
   beads: Bead[];
   dependencies: Dependency[];
+  teams?: Team[];
+  selectedTeam: string | null;
+  onTeamChange: (teamId: string | null) => void;
   onUpdate: (id: string, team: string, updates: Record<string, unknown>) => Promise<void>;
 }
 
@@ -33,6 +93,7 @@ interface GanttTask {
   depth: number;
   hasChildren: boolean;
   parentId: string | null;
+  healthStatus: HealthStatus;  // Calculated health status
 }
 
 const ROW_HEIGHT = 36;
@@ -51,11 +112,14 @@ interface DragState {
   currentEnd: Date;
 }
 
-export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
+export function GanttChart({ beads, dependencies, teams = [], selectedTeam, onTeamChange, onUpdate }: GanttChartProps) {
   const [editingBead, setEditingBead] = useState<Bead | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [mounted, setMounted] = useState(false);
+
+  // Use the filter hook for URL-synced filter state
+  const filterContext = useFilters();
 
   // Load collapsed state from localStorage after mount to avoid hydration mismatch
   useEffect(() => {
@@ -69,9 +133,7 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
       console.warn("Failed to load collapsed state:", e);
     }
   }, []);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [teamFilter, setTeamFilter] = useState<string>("all");
+
   const [focusedRowIndex, setFocusedRowIndex] = useState<number>(0);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const dayWidth = ZOOM_LEVELS[zoomIndex];
@@ -105,86 +167,94 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
     });
   };
 
-  // Apply search and filters
+  // Apply filters using the filter context
   const filteredBeads = useMemo(() => {
-    let filtered = beads;
-
-    // Apply search filter
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter((bead) =>
-        bead.title.toLowerCase().includes(query)
-      );
-    }
-
-    // Apply status filter
-    if (statusFilter !== "all") {
-      filtered = filtered.filter((bead) => bead.status === statusFilter);
-    }
-
-    // Apply team filter
-    if (teamFilter !== "all") {
-      filtered = filtered.filter((bead) => bead.team === teamFilter);
-    }
-
-    return filtered;
-  }, [beads, searchQuery, statusFilter, teamFilter]);
-
-  // Get unique teams and statuses for filters
-  const { uniqueTeams, uniqueStatuses } = useMemo(() => {
-    const teams = new Set<string>();
-    const statuses = new Set<string>();
-    beads.forEach((bead) => {
-      teams.add(bead.team);
-      statuses.add(bead.status);
-    });
-    return {
-      uniqueTeams: Array.from(teams).sort(),
-      uniqueStatuses: Array.from(statuses).sort(),
-    };
-  }, [beads]);
+    return filterContext.applyFilters(beads);
+  }, [beads, filterContext]);
 
   // Memo 1: Build hierarchy maps from dependencies
+  // Distinguishes between hierarchical containment vs sequential blocking:
+  // - Hierarchical: [1YR] contains [Q1] (different levels) -> parent-child
+  // - Sequential: [Q1] task blocks [Q1] other task (same level) -> just a dependency, not hierarchy
   const { childrenMap, parentMap, beadMap } = useMemo(() => {
-    const childrenMap = new Map<string, string[]>(); // parent -> children
-    const parentMap = new Map<string, string>(); // child -> parent
+    const childrenMap = new Map<string, string[]>(); // parent -> children (hierarchical only)
+    const parentMap = new Map<string, string>(); // child -> parent (hierarchical only)
+    const beadMap = new Map(filteredBeads.map((b) => [b.id, b]));
 
     for (const dep of dependencies) {
       if (dep.type === "blocks") {
         // In beads: issue_id depends on depends_on_id (issue contains depends_on)
         // So issue_id is the PARENT, depends_on_id is the CHILD
-        const parent = dep.issue_id;
-        const child = dep.depends_on_id;
+        const potentialParentId = dep.issue_id;
+        const potentialChildId = dep.depends_on_id;
 
-        const children = childrenMap.get(parent) || [];
-        children.push(child);
-        childrenMap.set(parent, children);
-        parentMap.set(child, parent);
+        const parentBead = beadMap.get(potentialParentId);
+        const childBead = beadMap.get(potentialChildId);
+
+        // Skip if either bead is not in our filtered set
+        if (!parentBead || !childBead) continue;
+
+        const parentLevel = getHierarchyLevel(parentBead.title);
+        const childLevel = getHierarchyLevel(childBead.title);
+
+        // Only treat as hierarchical parent-child if:
+        // 1. Parent has a HIGHER hierarchy level than child (e.g., [1YR] > [Q1])
+        // 2. This represents containment, not just sequential blocking
+        //
+        // Same level or inverted = sequential dependency, not hierarchy
+        if (parentLevel > childLevel) {
+          const children = childrenMap.get(potentialParentId) || [];
+          children.push(potentialChildId);
+          childrenMap.set(potentialParentId, children);
+          parentMap.set(potentialChildId, potentialParentId);
+        } else if (parentLevel > 0 && childLevel > 0 && parentLevel < childLevel) {
+          // Warn about potentially inverted relationships
+          // (where declared parent has lower level than declared child)
+          console.warn(
+            `Inverted hierarchy detected: "${parentBead.title}" (level ${parentLevel}) ` +
+            `declared as parent of "${childBead.title}" (level ${childLevel}). ` +
+            `Treating as sequential dependency.`
+          );
+        }
+        // If same level (e.g., both [Q1]), it's a sequential dependency - no tree relationship
       }
     }
-
-    const beadMap = new Map(filteredBeads.map((b) => [b.id, b]));
 
     return { childrenMap, parentMap, beadMap };
   }, [filteredBeads, dependencies]);
 
   // Memo 2: Parse dates for all beads
+  // Priority: 1) title date patterns (Q1, H1, JAN, etc.), 2) due_at field, 3) created_at + estimate
   const beadDates = useMemo(() => {
     const now = new Date();
     const currentYear = now.getFullYear();
     const dates = new Map<string, { start: Date; end: Date }>();
 
     for (const bead of filteredBeads) {
+      // First try parsing time-period patterns from title (Q1, H1, JAN, W1, etc.)
+      // These define a date RANGE, not just an end date
       const parsedRange = parseDateRangeFromTitle(bead.title, currentYear);
       if (parsedRange) {
         dates.set(bead.id, { start: parsedRange.start, end: parsedRange.end });
-      } else {
-        const start = startOfDay(new Date(bead.created_at));
-        const estimatedDays = bead.estimated_minutes
-          ? Math.ceil(bead.estimated_minutes / 480)
-          : 14;
-        dates.set(bead.id, { start, end: endOfDay(addDays(start, estimatedDays)) });
+        continue;
       }
+
+      // Then try due_at field (from DB or labels) for tasks without time-period prefixes
+      if (bead.due_at) {
+        const dueDate = new Date(bead.due_at);
+        if (!isNaN(dueDate.getTime())) {
+          const start = startOfDay(new Date(bead.created_at));
+          dates.set(bead.id, { start, end: endOfDay(dueDate) });
+          continue;
+        }
+      }
+
+      // Fallback to created_at + estimate
+      const start = startOfDay(new Date(bead.created_at));
+      const estimatedDays = bead.estimated_minutes
+        ? Math.ceil(bead.estimated_minutes / 480)
+        : 14;
+      dates.set(bead.id, { start, end: endOfDay(addDays(start, estimatedDays)) });
     }
 
     return dates;
@@ -202,12 +272,37 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
       }
     }
 
-    // Sort function by start date
-    const sortByStartDate = (ids: string[]) => {
+    // Hierarchy-aware sort function
+    // Sort order: hierarchy_weight ASC -> period_sort_key ASC -> start_date ASC
+    const sortByHierarchy = (ids: string[]) => {
       return ids.sort((a, b) => {
+        const beadA = beadMap.get(a);
+        const beadB = beadMap.get(b);
+        if (!beadA || !beadB) return 0;
+
+        const prefixA = parseBeadPrefix(beadA.title);
+        const prefixB = parseBeadPrefix(beadB.title);
+
+        // 1. Compare by hierarchy level (lower = broader scope = first)
+        if (prefixA.level !== prefixB.level) {
+          return prefixA.level - prefixB.level;
+        }
+
+        // 2. Compare by period sort key (chronological within same level)
+        if (prefixA.periodSortKey !== prefixB.periodSortKey) {
+          return prefixA.periodSortKey - prefixB.periodSortKey;
+        }
+
+        // 3. Compare by start date
         const dateA = beadDates.get(a)?.start || new Date();
         const dateB = beadDates.get(b)?.start || new Date();
-        return dateA.getTime() - dateB.getTime();
+        const dateDiff = dateA.getTime() - dateB.getTime();
+        if (dateDiff !== 0) {
+          return dateDiff;
+        }
+
+        // 4. Compare by created_at as final tiebreaker
+        return new Date(beadA.created_at).getTime() - new Date(beadB.created_at).getTime();
       });
     };
 
@@ -244,6 +339,11 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
         ? Math.max(0, Math.min(100, (elapsed / totalDuration) * 100))
         : 0;
 
+      // Calculate expected progress and health status
+      const expectedProgress = calculateExpectedProgress(taskStart, taskEnd, now);
+      const hasBlockers = bead.status === 'blocked';
+      const healthStatusResult = calculateHealthStatus(progress, expectedProgress, hasBlockers);
+
       taskList.push({
         bead,
         start: taskStart,
@@ -253,11 +353,12 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
         depth,
         hasChildren,
         parentId: parentMap.get(id) || null,
+        healthStatus: healthStatusResult.status,
       });
 
       // Recursively add children (sorted by start date)
       if (hasChildren && !collapsed.has(id)) {
-        const sortedChildren = sortByStartDate(children);
+        const sortedChildren = sortByHierarchy(children);
         for (const childId of sortedChildren) {
           traverse(childId, depth + 1);
         }
@@ -265,7 +366,7 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
     };
 
     // Start with sorted roots
-    const sortedRoots = sortByStartDate(roots);
+    const sortedRoots = sortByHierarchy(roots);
     for (const rootId of sortedRoots) {
       traverse(rootId, 0);
     }
@@ -432,6 +533,17 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
     }
   };
 
+  // Get bar color based on health status
+  const getHealthBarColor = (healthStatus: HealthStatus): string => {
+    const colors: Record<HealthStatus, string> = {
+      on_track: '#22c55e',
+      at_risk: '#eab308',
+      blocked: '#ef4444',
+      not_started: '#9ca3af',
+    };
+    return colors[healthStatus];
+  };
+
   const getBarPosition = (task: GanttTask, rowIndex: number, useDragDates = false) => {
     const dates = useDragDates ? getDragAdjustedDates(task) : { start: task.start, end: task.end };
     const startOffset = differenceInDays(dates.start, startDate);
@@ -472,11 +584,12 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
           const parentPos = getBarPosition(parentTask, parentIdx);
           const childPos = getBarPosition(childTask, childIdx);
 
-          // Draw curved arrow from end of parent bar to start of child bar
-          const x1 = parentPos.left + parentPos.width;
-          const y1 = parentPos.top + parentPos.height / 2;
-          const x2 = childPos.left;
-          const y2 = childPos.top + childPos.height / 2;
+          // Draw curved arrow from end of child bar to end of parent bar
+          // This shows the child task "connecting to" its containing parent epic
+          const x1 = childPos.left + childPos.width;  // END of child
+          const y1 = childPos.top + childPos.height / 2;
+          const x2 = parentPos.left + parentPos.width;  // END of parent
+          const y2 = parentPos.top + parentPos.height / 2;
 
           // Control points for bezier curve
           const midX = (x1 + x2) / 2;
@@ -645,56 +758,46 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
   return (
     <>
       <div className="gantt-wrapper">
-        {/* Search and filter controls */}
-        <div className="gantt-controls">
-          <input
-            type="text"
-            className="gantt-search"
-            placeholder="Search tasks..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            aria-label="Search tasks"
-          />
-          <select
-            className="gantt-filter"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            aria-label="Filter by status"
-          >
-            <option value="all">All Statuses</option>
-            {uniqueStatuses.map((status) => (
-              <option key={status} value={status}>
-                {status.replace("_", " ")}
-              </option>
-            ))}
-          </select>
-          <select
-            className="gantt-filter"
-            value={teamFilter}
-            onChange={(e) => setTeamFilter(e.target.value)}
-            aria-label="Filter by team"
-          >
-            <option value="all">All Teams</option>
-            {uniqueTeams.map((team) => (
-              <option key={team} value={team}>
-                {team}
-              </option>
-            ))}
-          </select>
-          {(searchQuery || statusFilter !== "all" || teamFilter !== "all") && (
-            <button
-              className="gantt-clear-filters"
-              onClick={() => {
-                setSearchQuery("");
-                setStatusFilter("all");
-                setTeamFilter("all");
-              }}
-              aria-label="Clear filters"
-            >
-              Clear Filters
-            </button>
-          )}
-        </div>
+        {/* Advanced filter bar */}
+        <FilterBar
+          beads={beads}
+          teams={teams}
+          selectedTeam={selectedTeam}
+          onTeamChange={onTeamChange}
+          searchQuery={filterContext.filters.search}
+          onSearchChange={filterContext.setSearch}
+          statusFilter={filterContext.filters.status}
+          onStatusChange={filterContext.setStatus}
+          priorityFilter={filterContext.filters.priority}
+          onPriorityChange={filterContext.setPriority}
+          issueTypeFilter={filterContext.filters.issueType}
+          onIssueTypeChange={filterContext.setIssueType}
+          dueDateFilter={filterContext.filters.dueDate}
+          onDueDateChange={filterContext.setDueDate}
+          onClearAllFilters={() => {
+            filterContext.clearFilters();
+            onTeamChange(null);
+          }}
+          onClearFilter={(filterType) => {
+            switch (filterType) {
+              case "status":
+                filterContext.setStatus([]);
+                break;
+              case "priority":
+                filterContext.setPriority([]);
+                break;
+              case "issueType":
+                filterContext.setIssueType([]);
+                break;
+              case "dueDate":
+                filterContext.setDueDate({ preset: "all" });
+                break;
+              case "team":
+                onTeamChange(null);
+                break;
+            }
+          }}
+        />
 
         {/* Fixed header row */}
         <div className="gantt-header-row">
@@ -877,15 +980,18 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
               const isDragging = dragState?.taskId === task.bead.id;
               const pos = getBarPosition(task, rowIndex, true);
               const dates = getDragAdjustedDates(task);
+              const healthColor = getHealthBarColor(task.healthStatus);
               return (
                 <div
                   key={task.bead.id}
-                  className={`gantt-bar ${task.bead.issue_type} depth-${Math.min(task.depth, 3)} ${isDragging ? "dragging" : ""}`}
+                  className={`gantt-bar ${task.bead.issue_type} depth-${Math.min(task.depth, 3)} ${isDragging ? "dragging" : ""} health-${task.healthStatus}`}
                   style={{
                     left: pos.left,
                     width: pos.width,
                     top: pos.top,
                     cursor: dragState ? (dragState.type === "move" ? "grabbing" : "ew-resize") : "grab",
+                    backgroundColor: healthColor,
+                    opacity: task.bead.status === 'closed' ? 0.7 : 0.85,
                   }}
                   tabIndex={0}
                   onClick={() => !dragState && setEditingBead(task.bead)}
@@ -897,8 +1003,8 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
                     }
                   }}
                   role="button"
-                  aria-label={`${task.bead.title}, ${format(dates.start, "MMM d, yyyy")} to ${format(dates.end, "MMM d, yyyy")}`}
-                  title={`${task.bead.title}\n${format(dates.start, "MMM d, yyyy")} - ${format(dates.end, "MMM d, yyyy")}`}
+                  aria-label={`${task.bead.title}, ${format(dates.start, "MMM d, yyyy")} to ${format(dates.end, "MMM d, yyyy")}, Health: ${task.healthStatus.replace('_', ' ')}`}
+                  title={`${task.bead.title}\n${format(dates.start, "MMM d, yyyy")} - ${format(dates.end, "MMM d, yyyy")}\nHealth: ${task.healthStatus.replace('_', ' ')}`}
                 >
                   {/* Left resize handle */}
                   <div
@@ -977,25 +1083,38 @@ export function GanttChart({ beads, dependencies, onUpdate }: GanttChartProps) {
       </div>
 
       <div className="legend">
-        <div className="legend-item">
-          <div className="legend-color" style={{ background: "#7c3aed" }} />
-          <span>Epic</span>
+        <div className="legend-section">
+          <div className="legend-title" style={{ fontSize: '10px', color: '#9ca3af', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Issue Types
+          </div>
+          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+            <div className="legend-item">
+              <div className="legend-color" style={{ background: "#7c3aed" }} />
+              <span>Epic</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color" style={{ background: "#2563eb" }} />
+              <span>Feature</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color" style={{ background: "#059669" }} />
+              <span>Task</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color" style={{ background: "#dc2626" }} />
+              <span>Bug</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color" style={{ background: "#3b82f6", width: 2, height: 12 }} />
+              <span>Today</span>
+            </div>
+          </div>
         </div>
-        <div className="legend-item">
-          <div className="legend-color" style={{ background: "#2563eb" }} />
-          <span>Feature</span>
-        </div>
-        <div className="legend-item">
-          <div className="legend-color" style={{ background: "#059669" }} />
-          <span>Task</span>
-        </div>
-        <div className="legend-item">
-          <div className="legend-color" style={{ background: "#dc2626" }} />
-          <span>Bug</span>
-        </div>
-        <div className="legend-item" style={{ marginLeft: "auto" }}>
-          <div className="legend-color" style={{ background: "#3b82f6", width: 2, height: 12 }} />
-          <span>Today</span>
+        <div className="legend-section" style={{ marginLeft: 'auto' }}>
+          <div className="legend-title" style={{ fontSize: '10px', color: '#9ca3af', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Health Status
+          </div>
+          <HealthLegend compact={true} />
         </div>
       </div>
 
